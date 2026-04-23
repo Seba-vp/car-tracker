@@ -118,21 +118,35 @@ python finalize.py
 - **Per-source isolation**: matrix has `fail-fast: false` so one blocked source doesn't kill the sweep.
 - **Real User-Agents**: each scraper uses a modern browser UA appropriate for its target (Safari 17 for auto.cl's Cloudflare, Chrome 138 for MercadoLibre's sec-ch-ua checks).
 
-## Known anti-bot behavior per source
+## Known anti-bot behavior per source (as of 2026-04-23)
 
-| Source | Anti-bot | Current workaround |
-|---|---|---|
-| auto.cl | Cloudflare blocks Chrome-on-macOS UA | Safari 17 UA |
-| chileautos | DataDome on `/vehiculos/*` HTML | Use `/_api/*` JSON endpoints |
-| mercadolibre | `_csrf` cookie required on first subdomain hit | 2-step warm-up |
-| yapo | Brotli-compressed responses | Don't advertise `Accept-Encoding: br` |
-| autocosmos | `Crawl-Delay: 20` in robots.txt | Respected in scraper |
-| demotores | TCP-level geo-block (non-CL IPs) | None; skipped |
+Verified against GH Actions runners (Azure IPs). Status changes over time.
 
-If a source starts returning 403/429 in production, the fallback toolkit is:
-1. Add `curl_cffi` (TLS-fingerprint browser impersonation) — no IP rotation needed
-2. Rotate across 3-4 browser UAs per daily run
-3. Last resort: Playwright with a GH-hosted self-runner
+| Source | Status | Anti-bot | Current handling |
+|---|---|---|---|
+| yapo | 🟢 50/50 | None on `/autos-usados` | stdlib requests + drop brotli |
+| chileautos | 🟢 42/42 | DataDome on HTML, JSON API unprotected | `/_api/search-core` + `/_api/details-core` |
+| autocosmos | 🟢 40/40 | `Crawl-Delay: 20` | respected |
+| kavak | 🟢 40/40 | 403 on Chrome UA locally, passes from GH | Safari UA |
+| autopia | 🟢 25/25 | None | Inertia.js `data-page` JSON |
+| auto_cl | 🟢 20/20 | Cloudflare blocks stdlib requests (TLS fingerprint) | `curl_cffi` + safari17_0 impersonation |
+| autosusados | 🟢 20/20 | None | `__NEXT_DATA__` parse |
+| mercadolibre | 🟡 0 (graceful) | "suspicious-traffic-frontend" Continuar challenge — TLS impersonation + warm-up insufficient | Returns empty; needs Playwright or elevated API scope |
+| economicos | 🟡 0 (graceful) | Hard 403, curl_cffi also blocked (tightened since initial test) | Returns empty; needs browser or different entry path |
+| demotores | ⛔ 0 (blocked) | TCP-level geo-block (non-CL IPs) | Scaffold only; needs Chilean residential proxy |
+
+Graceful-failure scrapers exit 0 with `[]` so the workflow stays green and
+`scrape_runs` records `rows_fetched=0, status=ok`. Bump priority if we want to
+recover those 3 sources.
+
+### Fallback toolkit
+
+In order of cost, when a source escalates:
+1. **`curl_cffi` with browser impersonation** — fixes TLS fingerprint blocks (worked for auto_cl)
+2. **Rotate across Safari / Firefox / Chrome UAs** per daily run
+3. **Add `Referer` / `Cookie` replay** if site is cookie-gated
+4. **Headless Playwright** for JS challenges (mercadolibre's Continuar flow) — ~2-3 min per source, still fits GH Actions
+5. **Residential proxy** — last resort, costs ~$10-50/mo, fixes IP-block cases like demotores
 
 ## Scaling targets
 
