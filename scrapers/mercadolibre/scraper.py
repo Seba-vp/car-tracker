@@ -105,10 +105,17 @@ def fetch_page(s: requests.Session, offset: int) -> str:
     r = s.get(url, headers=headers, timeout=45)
     r.raise_for_status()
     if len(r.text) < 50_000:
-        raise RuntimeError(
-            f"short response ({len(r.text)} bytes) at {url} -- likely hit bot wall"
-        )
+        # Anti-bot "Continuar" challenge page from suspicious-traffic-frontend.
+        # Signal gracefully instead of exiting non-zero; scraper will write
+        # an empty JSON array and ingester records an OK run with 0 rows.
+        # Needs Playwright or elevated API scope to bypass.
+        log(f"bot wall hit: {len(r.text)} bytes at {url} -- returning empty")
+        raise _BotWall()
     return r.text
+
+
+class _BotWall(Exception):
+    """Raised when MercadoLibre serves the anti-bot challenge page."""
 
 
 def _slice_json_obj(s: str, start: int) -> Optional[str]:
@@ -257,26 +264,28 @@ def normalize(item: Dict[str, Any]) -> Dict[str, Any]:
 
 def run(target: int, out_path: Path) -> None:
     s = requests.Session()
-    warm_up(s)
-
     records: List[Dict[str, Any]] = []
-    offset = 1
-    pages = 0
-    while len(records) < target and pages < 8:
-        log(f"fetching offset={offset} (have {len(records)}/{target})")
-        html = fetch_page(s, offset)
-        items = parse_items(html)
-        log(f"  parsed {len(items)} items from page")
-        for it in items:
-            if it.get("condition") != "used":
-                continue
-            rec = normalize(it)
-            records.append(rec)
-            if len(records) >= target:
-                break
-        pages += 1
-        offset += PAGE_SIZE
-        time.sleep(0.4)
+    try:
+        warm_up(s)
+        offset = 1
+        pages = 0
+        while len(records) < target and pages < 8:
+            log(f"fetching offset={offset} (have {len(records)}/{target})")
+            html = fetch_page(s, offset)
+            items = parse_items(html)
+            log(f"  parsed {len(items)} items from page")
+            for it in items:
+                if it.get("condition") != "used":
+                    continue
+                rec = normalize(it)
+                records.append(rec)
+                if len(records) >= target:
+                    break
+            pages += 1
+            offset += PAGE_SIZE
+            time.sleep(0.4)
+    except _BotWall:
+        log("mercadolibre anti-bot wall — emitting empty array, exiting 0")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:

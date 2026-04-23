@@ -60,7 +60,12 @@ def upsert_listings(rows: list[dict], chunk_size: int = 200) -> list[dict]:
         chunk = rows[i : i + chunk_size]
         for r in chunk:
             r["last_seen_at"] = now_iso
-        r = requests.post(endpoint, headers=_headers(), data=json.dumps(chunk), timeout=60)
+        r = requests.post(
+            endpoint,
+            headers=_headers("return=representation,resolution=merge-duplicates"),
+            data=json.dumps(chunk),
+            timeout=60,
+        )
         if r.status_code >= 400:
             _log(f"upsert failed {r.status_code}: {r.text[:500]}")
             r.raise_for_status()

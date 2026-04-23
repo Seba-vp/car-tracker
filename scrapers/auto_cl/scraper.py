@@ -29,7 +29,9 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-import requests
+# Cloudflare blocks stdlib requests (TLS fingerprint). curl_cffi's
+# Safari impersonation passes. API-compatible with `requests`.
+from curl_cffi import requests  # type: ignore
 
 SOURCE_SLUG = "auto_cl"
 BASE = "https://www.auto.cl"
@@ -178,7 +180,7 @@ def parse_listing(url: str, html: str) -> dict[str, Any] | None:
 
 
 def main(limit: int = 20) -> None:
-    session = requests.Session()
+    session = requests.Session(impersonate="safari17_0")
     log("loading sitemap")
     urls = get_used_urls(session)
     log(f"{len(urls)} used detail URLs in sitemap")
