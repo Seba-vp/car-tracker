@@ -1,0 +1,86 @@
+name: Daily Chile Car Scrape
+
+on:
+  schedule:
+    # 07:00 UTC = 03:00 Santiago (CLST) / 04:00 (CLT).
+    # Pre-dawn in Chile → minimal impact on source sites' live traffic.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      sources:
+        description: 'comma-separated slugs, or "all"'
+        default: 'all'
+        type: string
+
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      sources: ${{ steps.set.outputs.sources }}
+    steps:
+      - id: set
+        shell: bash
+        run: |
+          input="${{ github.event.inputs.sources }}"
+          if [ -z "$input" ] || [ "$input" = "all" ]; then
+            echo 'sources=["mercadolibre","chileautos","yapo","kavak","autocosmos","economicos","autopia","auto_cl","autosusados"]' >> "$GITHUB_OUTPUT"
+          else
+            # transform "a,b,c" -> ["a","b","c"]
+            json=$(printf '%s' "$input" | python3 -c 'import json,sys; xs=[x.strip() for x in sys.stdin.read().split(",") if x.strip()]; print(json.dumps(xs))')
+            echo "sources=$json" >> "$GITHUB_OUTPUT"
+          fi
+
+  scrape:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 3  # stagger sources so GH IP doesn't hit all sites simultaneously
+      matrix:
+        source: ${{ fromJson(needs.plan.outputs.sources) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python ingest.py --source ${{ matrix.source }}
+
+      - name: Upload raw JSON artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-${{ matrix.source }}-${{ github.run_id }}
+          path: data/${{ matrix.source }}.json
+          retention-days: 7
+          if-no-files-found: warn
+
+  finalize:
+    needs: scrape
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Mark stale listings removed + daily summary
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python finalize.py
