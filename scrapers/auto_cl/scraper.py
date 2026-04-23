@@ -217,8 +217,11 @@ def main(limit: int = 20) -> None:
         polite_sleep()
 
     log(f"done: {len(results)} listings parsed (from {attempts} attempts)")
-    json.dump(results, sys.stdout, ensure_ascii=False, indent=2)
-    sys.stdout.write("\n")
+    from pathlib import Path as _P
+    out = _P("data/auto_cl.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(results, ensure_ascii=False, indent=2))
+    log(f"[write] {out}")
 
 
 if __name__ == "__main__":

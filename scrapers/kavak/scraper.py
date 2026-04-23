@@ -45,8 +45,8 @@ LIST_URL = BASE + "/cl/usados"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+        "Version/17.2 Safari/605.1.15"
     ),
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
@@ -349,7 +349,7 @@ def scrape(target: int, enrich: bool) -> list[dict[str, Any]]:
 def main(argv: Iterable[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Scrape Kavak Chile used car listings.")
     ap.add_argument("--target", type=int, default=40, help="Number of listings to collect (default 40).")
-    ap.add_argument("--out", type=str, default="-", help="Output file (default stdout).")
+    ap.add_argument("--out", type=str, default="data/kavak.json", help="Output file.")
     ap.add_argument("--no-enrich", action="store_true", help="Skip VIP fetch; list-only data.")
     args = ap.parse_args(list(argv) if argv is not None else None)
 
@@ -357,12 +357,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     log(f"[done] {len(listings)} listings")
 
     payload = json.dumps(listings, ensure_ascii=False, indent=2)
-    if args.out == "-":
-        sys.stdout.write(payload + "\n")
-    else:
-        with open(args.out, "w", encoding="utf-8") as f:
-            f.write(payload + "\n")
-        log(f"[write] {args.out}")
+    from pathlib import Path as _P
+    _P(args.out).parent.mkdir(parents=True, exist_ok=True)
+    with open(args.out, "w", encoding="utf-8") as f:
+        f.write(payload + "\n")
+    log(f"[write] {args.out}")
     return 0
 
 

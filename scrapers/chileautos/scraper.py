@@ -39,9 +39,7 @@ SEARCH_API = f"{BASE}/_api/search-core/"
 DETAILS_API = f"{BASE}/_api/details-core/"
 QUERY = "(And.(C.Category.autos.)_.State.Usado.)"
 
-OUT_PATH = Path(
-    "/Users/seba/Desktop/seba-core/projects/car-tracker/data/chileautos.json"
-)
+OUT_PATH = Path("data/chileautos.json")
 
 HEADERS = {
     "User-Agent": (

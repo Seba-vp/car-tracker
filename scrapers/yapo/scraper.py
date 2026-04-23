@@ -43,9 +43,7 @@ from bs4 import BeautifulSoup
 
 BASE = "https://www.yapo.cl"
 LIST_PATH = "/autos-usados"
-OUT_PATH = Path(
-    "/Users/seba/Desktop/seba-core/projects/car-tracker/data/yapo.json"
-)
+OUT_PATH = Path("data/yapo.json")
 
 HEADERS = {
     "User-Agent": (

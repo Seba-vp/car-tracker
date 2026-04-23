@@ -259,9 +259,11 @@ def scrape(limit: int = 25, delay: float = 0.7) -> list[dict[str, Any]]:
 
 
 def main() -> int:
-    out_path = sys.argv[1] if len(sys.argv) > 1 else "demotores.json"
+    out_path = sys.argv[1] if len(sys.argv) > 1 else "data/demotores.json"
     limit = int(sys.argv[2]) if len(sys.argv) > 2 else 25
     records = scrape(limit=limit)
+    from pathlib import Path as _P
+    _P(out_path).parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(records, fh, ensure_ascii=False, indent=2)
     log(f"wrote {len(records)} records -> {out_path}")

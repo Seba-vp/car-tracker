@@ -232,19 +232,15 @@ def collect(limit: int, max_pages: int = 5, pages: Iterable[int] | None = None) 
 
 def main(argv: list[str]) -> int:
     limit = int(argv[1]) if len(argv) > 1 else 30
-    out_path = argv[2] if len(argv) > 2 else None
-    # Mix first few pages (new dealer inventory) with deeper pages
-    # (older particular listings) so the sample represents the source.
+    out_path = argv[2] if len(argv) > 2 else "data/economicos.json"
     pages = [1, 2, 50, 100, 150]
     data = collect(limit=limit, max_pages=5, pages=pages)
     dumped = json.dumps(data, ensure_ascii=False, indent=2)
-    if out_path:
-        with open(out_path, "w", encoding="utf-8") as fp:
-            fp.write(dumped)
-        print(f"[done] wrote {len(data)} rows to {out_path}", file=sys.stderr)
-    else:
-        print(dumped)
-        print(f"[done] {len(data)} rows", file=sys.stderr)
+    from pathlib import Path as _P
+    _P(out_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as fp:
+        fp.write(dumped)
+    print(f"[done] wrote {len(data)} rows to {out_path}", file=sys.stderr)
     return 0
 
 

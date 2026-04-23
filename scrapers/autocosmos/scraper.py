@@ -391,10 +391,7 @@ def scrape(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", type=int, default=40)
-    ap.add_argument(
-        "--out",
-        default="/Users/seba/Desktop/seba-core/projects/car-tracker/data/autocosmos.json",
-    )
+    ap.add_argument("--out", default="data/autocosmos.json")
     ap.add_argument("--delay", type=float, default=0.8)
     ap.add_argument("--max-pages", type=int, default=5)
     a = ap.parse_args()

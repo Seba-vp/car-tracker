@@ -285,9 +285,7 @@ def run(target: int, out_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    default_out = Path(
-        "/Users/seba/Desktop/seba-core/projects/car-tracker/data/mercadolibre.json"
-    )
+    default_out = Path("data/mercadolibre.json")
     target = 40
     if len(sys.argv) > 1:
         target = int(sys.argv[1])
