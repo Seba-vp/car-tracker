@@ -12,6 +12,28 @@ See `reports/_FINAL.md` for the feasibility study that chose the 9 sources.
 - **Automation:** ✅ GitHub Actions daily cron at 07:00 UTC (03:00 Santiago).
 - **Dashboard:** ⏳ not started.
 
+## Supabase hosting (temporary)
+
+**Sharing the `prop-wizard` Supabase project** because free tier caps at 2 projects
+(we already have Pulse-Dashboard + prop-wizard). All car-tracker tables live in a
+dedicated `car_tracker` schema inside prop-wizard's DB; no `public` tables are
+touched. PostgREST requests route to the schema via `Accept-Profile` /
+`Content-Profile` headers, controlled by `SUPABASE_SCHEMA` env var (default
+`car_tracker`).
+
+**TODO — split into own Supabase project.** When any of these fire, migrate out:
+
+1. Free-tier DB storage (500 MB) gets tight across both projects
+2. We add a public-facing dashboard and don't want to share the egress quota
+3. We upgrade to Supabase Pro for another reason
+4. We want schema isolation via different service_role keys (reduces blast radius)
+
+Migration steps when that day comes:
+1. Create new Supabase project `car-tracker` in `sa-east-1`
+2. `pg_dump --schema=car_tracker <old> | psql <new>` (dump + restore the schema)
+3. Update GH secrets `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` to new project
+4. Drop `car_tracker` schema from prop-wizard DB
+
 ## Layout
 
 ```
@@ -49,12 +71,12 @@ car-tracker/
 # 1. Pin commit email (personal GitHub matches Vercel)
 git init && git config user.email ssebavillablanca@gmail.com
 
-# 2. Create Supabase project "chile-cars" in sa-east-1
-#    Copy ref + service_role key to local .env (use .env.example as template)
-
-# 3. Apply schema
+# 2. Apply schema to prop-wizard's Supabase (shared DB, isolated `car_tracker` schema)
 cd ~/Desktop/seba-core
-./scripts/supabase-sql.sh <ref> "$(cat projects/car-tracker/sql/schema.sql)"
+./scripts/supabase-sql.sh izbokfsmplxielwiyvup "$(cat projects/car-tracker/sql/schema.sql)"
+
+# 3. Expose `car_tracker` schema in PostgREST (dashboard step OR Management API)
+#    Dashboard: prop-wizard → Project Settings → API → Exposed schemas → add "car_tracker"
 
 # 4. Push to GitHub (new repo Seba-vp/car-tracker)
 

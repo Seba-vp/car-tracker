@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 STALE_DAYS = int(os.environ.get("STALE_DAYS", "3"))
+SCHEMA = os.environ.get("SUPABASE_SCHEMA", "car_tracker")
 
 
 def log(msg: str) -> None:
@@ -25,6 +26,8 @@ def headers(key: str) -> dict[str, str]:
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
         "Prefer": "return=representation,count=exact",
+        "Accept-Profile": SCHEMA,
+        "Content-Profile": SCHEMA,
     }
 
 

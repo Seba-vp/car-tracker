@@ -26,6 +26,9 @@ def _key() -> str:
     return _env("SUPABASE_SERVICE_ROLE_KEY")
 
 
+SCHEMA = os.environ.get("SUPABASE_SCHEMA", "car_tracker")
+
+
 def _headers(prefer: str = "return=representation") -> dict[str, str]:
     k = _key()
     return {
@@ -33,6 +36,8 @@ def _headers(prefer: str = "return=representation") -> dict[str, str]:
         "Authorization": f"Bearer {k}",
         "Content-Type": "application/json",
         "Prefer": prefer,
+        "Accept-Profile": SCHEMA,
+        "Content-Profile": SCHEMA,
     }
 
 

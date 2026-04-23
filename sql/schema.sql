@@ -1,7 +1,17 @@
--- chile-cars Supabase schema
--- Apply via: ./scripts/supabase-sql.sh <ref> "$(cat sql/schema.sql)"
+-- car-tracker schema
+-- Hosted inside the prop-wizard Supabase project (shared-free-tier workaround).
+-- See CLAUDE.md for the "split to own DB" migration plan.
+--
+-- Apply via: ./scripts/supabase-sql.sh <prop-wizard-ref> "$(cat sql/schema.sql)"
 
-CREATE TABLE IF NOT EXISTS listings (
+CREATE SCHEMA IF NOT EXISTS car_tracker;
+
+-- Allow Supabase's standard roles to see + operate within the schema.
+GRANT USAGE ON SCHEMA car_tracker TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA car_tracker GRANT ALL ON TABLES TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA car_tracker GRANT SELECT ON TABLES TO authenticated;
+
+CREATE TABLE IF NOT EXISTS car_tracker.listings (
   id                  bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
   source              text NOT NULL,
   source_id           text NOT NULL,
@@ -29,25 +39,25 @@ CREATE TABLE IF NOT EXISTS listings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_listings_make_model_year
-  ON listings (make, model, year) WHERE removed_at IS NULL;
+  ON car_tracker.listings (make, model, year) WHERE removed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_listings_last_seen
-  ON listings (last_seen_at);
+  ON car_tracker.listings (last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_listings_price_live
-  ON listings (latest_price_clp) WHERE removed_at IS NULL;
+  ON car_tracker.listings (latest_price_clp) WHERE removed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_listings_source_id
-  ON listings (source, source_id);
+  ON car_tracker.listings (source, source_id);
 
-CREATE TABLE IF NOT EXISTS listing_prices (
-  listing_id   bigint NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS car_tracker.listing_prices (
+  listing_id   bigint NOT NULL REFERENCES car_tracker.listings(id) ON DELETE CASCADE,
   price_clp    bigint NOT NULL,
   observed_at  timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (listing_id, observed_at)
 );
 
 CREATE INDEX IF NOT EXISTS idx_listing_prices_observed
-  ON listing_prices (observed_at);
+  ON car_tracker.listing_prices (observed_at);
 
-CREATE TABLE IF NOT EXISTS market_stats (
+CREATE TABLE IF NOT EXISTS car_tracker.market_stats (
   make          text NOT NULL,
   model         text NOT NULL,
   year          integer NOT NULL,
@@ -63,7 +73,7 @@ CREATE TABLE IF NOT EXISTS market_stats (
   PRIMARY KEY (make, model, year, km_bucket, fuel_type, computed_at)
 );
 
-CREATE TABLE IF NOT EXISTS scrape_runs (
+CREATE TABLE IF NOT EXISTS car_tracker.scrape_runs (
   id              bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
   source          text NOT NULL,
   started_at      timestamptz NOT NULL DEFAULT now(),
@@ -77,18 +87,18 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_scrape_runs_source_started
-  ON scrape_runs (source, started_at DESC);
+  ON car_tracker.scrape_runs (source, started_at DESC);
 
--- RLS: lock writes to service_role, allow authenticated read-only
-ALTER TABLE listings         ENABLE ROW LEVEL SECURITY;
-ALTER TABLE listing_prices   ENABLE ROW LEVEL SECURITY;
-ALTER TABLE market_stats     ENABLE ROW LEVEL SECURITY;
-ALTER TABLE scrape_runs      ENABLE ROW LEVEL SECURITY;
+-- RLS: service_role bypasses it; authenticated is read-only.
+ALTER TABLE car_tracker.listings         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE car_tracker.listing_prices   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE car_tracker.market_stats     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE car_tracker.scrape_runs      ENABLE ROW LEVEL SECURITY;
 
-DROP POLICY IF EXISTS "read_listings"       ON listings;
-DROP POLICY IF EXISTS "read_listing_prices" ON listing_prices;
-DROP POLICY IF EXISTS "read_market_stats"   ON market_stats;
+DROP POLICY IF EXISTS "read_listings"       ON car_tracker.listings;
+DROP POLICY IF EXISTS "read_listing_prices" ON car_tracker.listing_prices;
+DROP POLICY IF EXISTS "read_market_stats"   ON car_tracker.market_stats;
 
-CREATE POLICY "read_listings"       ON listings       FOR SELECT TO authenticated USING (true);
-CREATE POLICY "read_listing_prices" ON listing_prices FOR SELECT TO authenticated USING (true);
-CREATE POLICY "read_market_stats"   ON market_stats   FOR SELECT TO authenticated USING (true);
+CREATE POLICY "read_listings"       ON car_tracker.listings       FOR SELECT TO authenticated USING (true);
+CREATE POLICY "read_listing_prices" ON car_tracker.listing_prices FOR SELECT TO authenticated USING (true);
+CREATE POLICY "read_market_stats"   ON car_tracker.market_stats   FOR SELECT TO authenticated USING (true);
