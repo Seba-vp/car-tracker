@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import html as html_mod
 import json
+import os
 import re
 import sys
 import time
@@ -222,6 +223,24 @@ def parse_detail(
     region = CHILE_REGIONS.get(region_id) if region_id else None
     commune = infer_commune(data.get("clientName"))
 
+    # Images: detail page has `photos` list (full gallery). Homepage ad has
+    # `mainImage` / `photo` (thumbnail-only, single element).
+    image_urls: list[str] = []
+    photos = data.get("photos")
+    if isinstance(photos, list):
+        image_urls.extend([u for u in photos if isinstance(u, str) and u.startswith("http")])
+    if not image_urls and hp_ad:
+        for key in ("mainImage", "photo"):
+            v = hp_ad.get(key)
+            if isinstance(v, list):
+                image_urls.extend([u for u in v if isinstance(u, str) and u.startswith("http")])
+            elif isinstance(v, str) and v.startswith("http"):
+                image_urls.append(v)
+    # Dedupe preserving order
+    seen: set[str] = set()
+    image_urls = [u for u in image_urls if not (u in seen or seen.add(u))]
+    image_url = image_urls[0] if image_urls else None
+
     price = data.get("price")
     title_parts = [
         str(data.get("brandName") or "").strip(),
@@ -251,6 +270,8 @@ def parse_detail(
         "posted_at": posted_at,
         "scraped_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "seller_type": "dealer",
+        "image_url": image_url,
+        "image_urls": image_urls or None,
     }
 
 
@@ -302,9 +323,19 @@ def scrape(limit: int = 25, delay: float = 0.7) -> list[dict[str, Any]]:
     return records
 
 
+DEFAULT_TARGET = 150
+
+
 def main() -> int:
     out_path = sys.argv[1] if len(sys.argv) > 1 else "data/autopia.json"
-    limit = int(sys.argv[2]) if len(sys.argv) > 2 else 25
+    env_default = DEFAULT_TARGET
+    override = os.environ.get("SCRAPE_TARGET")
+    if override:
+        try:
+            env_default = int(override)
+        except ValueError:
+            pass
+    limit = int(sys.argv[2]) if len(sys.argv) > 2 else env_default
     records = scrape(limit=limit)
     from pathlib import Path as _P
     _P(out_path).parent.mkdir(parents=True, exist_ok=True)

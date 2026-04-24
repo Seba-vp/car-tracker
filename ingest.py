@@ -159,7 +159,7 @@ def main() -> int:
     ap.add_argument("--source", required=True, choices=SOURCES)
     ap.add_argument("--no-upload", action="store_true", help="Normalize only; skip DB writes")
     ap.add_argument("--file", help="Skip scraper; use this JSON file as input")
-    ap.add_argument("--timeout", type=int, default=600, help="Scraper subprocess timeout (s)")
+    ap.add_argument("--timeout", type=int, default=1800, help="Scraper subprocess timeout (s)")
     args = ap.parse_args()
 
     try:

@@ -26,6 +26,7 @@ headless browser (Playwright) — noted in the report.
 """
 
 import json
+import os
 import re
 import sys
 import time
@@ -126,8 +127,34 @@ def walk(node):
             yield from walk(v)
 
 
+def _extract_gallery_images(tile_node):
+    """Return a list of non-placeholder image URLs from a ListingCard's gallery."""
+    urls = []
+    gal = tile_node.get("gallery") if isinstance(tile_node, dict) else None
+    if not isinstance(gal, dict):
+        return urls
+    for ch in gal.get("children") or []:
+        if isinstance(ch, dict) and ch.get("type") == "Image":
+            u = ch.get("url")
+            if isinstance(u, str) and "pxcrush" in u and "placeholder" not in u:
+                urls.append(u)
+    return urls
+
+
+def _walk_find_listing_cards(node):
+    """Yield each ListingCard dict found anywhere in the tree."""
+    if isinstance(node, dict):
+        if node.get("type") == "ListingCard":
+            yield node
+        for v in node.values():
+            yield from _walk_find_listing_cards(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _walk_find_listing_cards(v)
+
+
 def extract_search_listings(search_json):
-    """Return list of {networkId, url, tracking}. One entry per tile."""
+    """Return list of {networkId, url, tracking, images}. One entry per tile."""
     if not search_json:
         return []
 
@@ -154,11 +181,33 @@ def extract_search_listings(search_json):
                 path, nid = m.group(1), m.group(2)
                 url_map.setdefault(nid, path)
 
+    # Images come straight from the ListingCard gallery. Match card -> nid by
+    # finding the nearest networkId descendant of each card.
+    image_map: dict[str, list[str]] = {}
+    for card in _walk_find_listing_cards(search_json):
+        # Find this card's networkId
+        nid = None
+        for sub in walk(card):
+            n = sub.get("networkId")
+            if isinstance(n, str) and n.startswith("CP-AD-"):
+                nid = n
+                break
+        if not nid:
+            continue
+        imgs = _extract_gallery_images(card)
+        if imgs and nid not in image_map:
+            image_map[nid] = imgs
+
     out = []
     for nid, tr in by_id.items():
         path = url_map.get(nid, f"/vehiculos/detalles/{nid}/")
         out.append(
-            {"networkId": nid, "url": BASE + path, "tracking": tr}
+            {
+                "networkId": nid,
+                "url": BASE + path,
+                "tracking": tr,
+                "images": image_map.get(nid, []),
+            }
         )
     return out
 
@@ -210,6 +259,22 @@ def extract_heading(details_json):
     return None
 
 
+def extract_detail_images(details_json):
+    """Collect pxcrush car image URLs from a details-core response."""
+    if not details_json:
+        return []
+    urls = []
+    seen = set()
+    for d in walk(details_json):
+        if d.get("type") == "Image" and isinstance(d.get("url"), str):
+            u = d["url"]
+            if "pxcrush" in u and "placeholder" not in u and "/cars/" in u:
+                if u not in seen:
+                    seen.add(u)
+                    urls.append(u)
+    return urls
+
+
 def extract_region_commune(details_json):
     """Pull region + commune from the details JSON key/values."""
     if not details_json:
@@ -259,10 +324,19 @@ def to_int(v):
         return None
 
 
-def normalise(src_listing, details_tracking, heading, url):
+def normalise(src_listing, details_tracking, heading, url, detail_images=None):
     """Merge search+detail tracking into our schema."""
     t = details_tracking or src_listing.get("tracking", {})
     nid = src_listing["networkId"]
+
+    # Images: prefer detail (richer) but fall back to the search-tile gallery.
+    images = list(detail_images or [])
+    if not images:
+        images = list(src_listing.get("images") or [])
+    # Dedupe while preserving order
+    seen_img = set()
+    images = [u for u in images if not (u in seen_img or seen_img.add(u))]
+    image_url = images[0] if images else None
 
     make = (t.get("make") or "").title() or None
     model = (t.get("model") or "").title() or None
@@ -306,36 +380,95 @@ def normalise(src_listing, details_tracking, heading, url):
         "posted_at": posted_at,
         "scraped_at": datetime.now(timezone.utc).isoformat(),
         "seller_type": norm_seller(t.get("sellertype")),
+        "image_url": image_url,
+        "image_urls": images or None,
     }
 
 
 # --- Main -----------------------------------------------------------------------
 
-def collect_listing_ids(session, target_count=50, max_pages=8):
-    """Page through search-core collecting unique listing refs."""
-    seen = {}  # networkId -> {url, tracking}
-    offset = 0
-    for page in range(max_pages):
-        url = f"{SEARCH_API}?q={QUERY}&offset={offset}"
-        log(f"search page {page + 1} offset={offset}")
-        j = fetch_json(url, session)
-        if not j:
-            log("  search fetch failed; stopping")
-            break
-        tiles = extract_search_listings(j)
-        new = 0
-        for t in tiles:
-            if t["networkId"] not in seen:
-                seen[t["networkId"]] = t
-                new += 1
-        log(f"  +{new} new  (total {len(seen)})")
+def collect_listing_ids(session, target_count=50, max_pages=60):
+    """Page through search-core collecting unique listing refs.
+
+    The Carsales Merlin API caps unique results per query at ~35-50 regardless
+    of offset (offset only reshuffles featured tiles). To reach the target we
+    shard the query by region and then by make, which surfaces different tile
+    sets each time.
+    """
+    seen = {}  # networkId -> tile dict
+
+    def _collect(q, limit_calls=6):
+        """Walk offsets for a single query until no new results."""
+        offset = 0
+        for _ in range(limit_calls):
+            url = f"{SEARCH_API}?q={q}&offset={offset}"
+            j = fetch_json(url, session)
+            if not j:
+                return False  # stop on error
+            tiles = extract_search_listings(j)
+            new = 0
+            for t in tiles:
+                if t["networkId"] not in seen:
+                    seen[t["networkId"]] = t
+                    new += 1
+            log(f"  q={q[:60]}... off={offset}: +{new} (total {len(seen)})")
+            if len(seen) >= target_count:
+                return True
+            if new == 0:
+                break
+            offset += 31
+            polite_sleep()
+        return True
+
+    # 1. Base query (covers featured tiles, ~40-50 unique).
+    log("shard: all usados")
+    if not _collect(QUERY):
+        return list(seen.values())
+    if len(seen) >= target_count:
+        return list(seen.values())
+
+    # 2. Region shards. Chile's 16 regions; list the 8 with most stock first.
+    REGIONS = [
+        "metropolitana-de-santiago",
+        "valparaiso",
+        "biobio",
+        "maule",
+        "ohiggins",
+        "araucania",
+        "los-lagos",
+        "coquimbo",
+        "antofagasta",
+        "los-rios",
+        "atacama",
+        "nuble",
+        "tarapaca",
+        "arica-parinacota",
+        "magallanes",
+        "aysen",
+    ]
+    for region in REGIONS:
         if len(seen) >= target_count:
             break
-        if new == 0:
-            log("  no new results, stopping")
+        q = f"(And.(C.Category.autos.)_.State.Usado._.Region.{region}.)"
+        log(f"shard region={region}")
+        if not _collect(q, limit_calls=3):
             break
-        offset += 20  # step partially through the tile list
-        polite_sleep()
+
+    # 3. Make shards for the most common brands (top ~25 in Chile).
+    MAKES = [
+        "toyota", "chevrolet", "nissan", "hyundai", "kia", "mazda", "suzuki",
+        "ford", "mitsubishi", "peugeot", "volkswagen", "honda", "jeep",
+        "subaru", "mercedes-benz", "bmw", "audi", "renault", "mg",
+        "great-wall", "dongfeng", "chery", "changan", "jac", "jetour",
+    ]
+    for make in MAKES:
+        if len(seen) >= target_count:
+            break
+        q = f"(And.(C.Category.autos.)_.State.Usado._.Make.{make}.)"
+        log(f"shard make={make}")
+        if not _collect(q, limit_calls=3):
+            break
+
     return list(seen.values())
 
 
@@ -357,7 +490,7 @@ def scrape(target_count=40):
     out = []
     for i, ref in enumerate(refs, 1):
         nid = ref["networkId"]
-        api_url = f"{DETAILS_API}{nid}"
+        api_url = f"{DETAILS_API}{nid}/"
         log(f"[{i}/{len(refs)}] {nid}")
         dj = fetch_json(api_url, session)
         if not dj:
@@ -368,14 +501,24 @@ def scrape(target_count=40):
             continue
         det = extract_details_tracking(dj)
         heading = extract_heading(dj)
-        out.append(normalise(ref, det, heading, ref["url"]))
+        det_imgs = extract_detail_images(dj)
+        out.append(normalise(ref, det, heading, ref["url"], detail_images=det_imgs))
         polite_sleep()
 
     return out
 
 
+DEFAULT_TARGET = 500
+
+
 def main():
-    target = 40
+    target = DEFAULT_TARGET
+    override = os.environ.get("SCRAPE_TARGET")
+    if override:
+        try:
+            target = int(override)
+        except ValueError:
+            pass
     if len(sys.argv) > 1:
         try:
             target = int(sys.argv[1])

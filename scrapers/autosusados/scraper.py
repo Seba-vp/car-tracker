@@ -13,6 +13,7 @@ Output: JSON array on stdout. Progress on stderr.
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import sys
@@ -184,6 +185,23 @@ def parse_listing(url: str, html: str) -> dict[str, Any] | None:
     ]
     title = " ".join(p for p in title_parts if p) or ldj.get("name")
 
+    # Images: carInfo.photos is a list of URL strings.
+    image_urls: list[str] = []
+    photos = ci.get("photos")
+    if isinstance(photos, list):
+        image_urls.extend([u for u in photos if isinstance(u, str) and u.startswith("http")])
+    # Fallback to ld+json image
+    if not image_urls:
+        ldj_img = ldj.get("image")
+        if isinstance(ldj_img, str) and ldj_img.startswith("http"):
+            image_urls.append(ldj_img)
+        elif isinstance(ldj_img, list):
+            image_urls.extend([u for u in ldj_img if isinstance(u, str) and u.startswith("http")])
+    # Dedupe preserving order
+    seen_img: set[str] = set()
+    image_urls = [u for u in image_urls if not (u in seen_img or seen_img.add(u))]
+    image_url = image_urls[0] if image_urls else None
+
     return {
         "source": SOURCE_SLUG,
         "source_id": source_id,
@@ -204,6 +222,8 @@ def parse_listing(url: str, html: str) -> dict[str, Any] | None:
         "posted_at": posted_at,
         "scraped_at": datetime.now(timezone.utc).isoformat(),
         "seller_type": seller_type,
+        "image_url": image_url,
+        "image_urls": image_urls or None,
     }
 
 
@@ -248,6 +268,18 @@ def main(limit: int = 20) -> None:
     log(f"[write] {out}")
 
 
+DEFAULT_TARGET = 300
+
+
 if __name__ == "__main__":
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 20
+    if len(sys.argv) > 1:
+        n = int(sys.argv[1])
+    else:
+        n = DEFAULT_TARGET
+        override = os.environ.get("SCRAPE_TARGET")
+        if override:
+            try:
+                n = int(override)
+            except ValueError:
+                pass
     main(n)

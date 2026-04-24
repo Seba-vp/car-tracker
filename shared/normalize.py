@@ -226,6 +226,16 @@ def normalize_row(raw: dict, source: str) -> dict | None:
     if not price or price <= 0:
         return None
 
+    # Image URLs: primary + full gallery. Pass-through; don't invent values.
+    image_url_raw = raw.get("image_url")
+    image_url = image_url_raw.strip() if isinstance(image_url_raw, str) and image_url_raw.strip() else None
+
+    image_urls_raw = raw.get("image_urls")
+    image_urls: list[str] | None = None
+    if isinstance(image_urls_raw, list):
+        cleaned = [u.strip() for u in image_urls_raw if isinstance(u, str) and u.strip()]
+        image_urls = cleaned or None
+
     return {
         "source": source,
         "source_id": source_id,
@@ -245,5 +255,7 @@ def normalize_row(raw: dict, source: str) -> dict | None:
         "currency": (raw.get("currency") or "CLP").upper(),
         "source_posted_at": norm_ts(raw.get("posted_at")),
         "latest_price_clp": price,
+        "image_url": image_url,
+        "image_urls": image_urls,
         "raw": raw,
     }

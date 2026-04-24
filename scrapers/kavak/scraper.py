@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import sys
@@ -154,6 +155,18 @@ def parse_list_page(html: str) -> list[dict[str, Any]]:
         if title:
             title = title.replace(" • ", " ")
 
+        # List-page thumbnail: look for a url pointing to kavak-cdn or cloudinary
+        # inside this card's window.
+        img = None
+        for mi in re.finditer(
+            r'\\"(?:image|photo|thumbnail|src)\\":\\"(https?://[^"\\]+)\\"',
+            window,
+        ):
+            candidate = _unescape_rsc(mi.group(1))
+            if any(x in candidate for x in ("cloudinary", "kavak", "images/")):
+                img = candidate
+                break
+
         cards.append(
             {
                 "source_id": source_id,
@@ -168,6 +181,7 @@ def parse_list_page(html: str) -> list[dict[str, Any]]:
                 "transmission": transmission,
                 "region": region,
                 "body_type": body,
+                "image_url": img,
             }
         )
     return cards
@@ -243,6 +257,20 @@ def enrich_from_vip(stub: dict[str, Any], html: str) -> dict[str, Any]:
     region, commune = _find_hub(html)
     out["region"] = out.get("region") or region
     out["commune"] = commune
+
+    # JSON-LD Car schema has an "image" field which may be a string or list.
+    image = car.get("image")
+    image_urls: list[str] = []
+    if isinstance(image, str):
+        image_urls.append(image)
+    elif isinstance(image, list):
+        image_urls.extend([u for u in image if isinstance(u, str)])
+    # Dedupe, preserve order
+    seen: set[str] = set()
+    image_urls = [u for u in image_urls if not (u in seen or seen.add(u))]
+    if image_urls:
+        out["image_url"] = out.get("image_url") or image_urls[0]
+        out["image_urls"] = image_urls
     return out
 
 
@@ -268,7 +296,7 @@ def scrape(target: int, enrich: bool) -> list[dict[str, Any]]:
     seen_ids: set[str] = set()
 
     page = 1
-    while len(stubs) < target and page <= 20:
+    while len(stubs) < target and page <= 60:
         url = LIST_URL if page == 1 else f"{LIST_URL}?page={page}"
         log(f"[list] page {page} -> {url}")
         html = fetch(session, url)
@@ -314,6 +342,8 @@ def scrape(target: int, enrich: bool) -> list[dict[str, Any]]:
             "posted_at": None,  # Kavak does not publish a listing-creation timestamp.
             "scraped_at": now_iso,
             "seller_type": "dealer",
+            "image_url": stub.get("image_url"),
+            "image_urls": None,
         }
 
         if enrich:
@@ -335,6 +365,8 @@ def scrape(target: int, enrich: bool) -> list[dict[str, Any]]:
                             "currency",
                             "region",
                             "commune",
+                            "image_url",
+                            "image_urls",
                         )
                     }
                 )
@@ -346,9 +378,19 @@ def scrape(target: int, enrich: bool) -> list[dict[str, Any]]:
     return results
 
 
+DEFAULT_TARGET = 200
+
+
 def main(argv: Iterable[str] | None = None) -> int:
+    env_default = DEFAULT_TARGET
+    override = os.environ.get("SCRAPE_TARGET")
+    if override:
+        try:
+            env_default = int(override)
+        except ValueError:
+            pass
     ap = argparse.ArgumentParser(description="Scrape Kavak Chile used car listings.")
-    ap.add_argument("--target", type=int, default=40, help="Number of listings to collect (default 40).")
+    ap.add_argument("--target", type=int, default=env_default, help=f"Number of listings to collect (default {DEFAULT_TARGET}).")
     ap.add_argument("--out", type=str, default="data/kavak.json", help="Output file.")
     ap.add_argument("--no-enrich", action="store_true", help="Skip VIP fetch; list-only data.")
     args = ap.parse_args(list(argv) if argv is not None else None)

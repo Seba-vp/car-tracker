@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -183,6 +184,14 @@ def parse_index_cards(html: str) -> list[dict]:
             if name_meta:
                 title = name_meta.get("content")
 
+        # Image: <img itemprop="image" content="Large..." src="Small...">
+        image_url = None
+        img_el = c.find(itemprop="image")
+        if img_el:
+            image_url = img_el.get("content") or img_el.get("src") or None
+        if image_url and not image_url.startswith("http"):
+            image_url = urljoin(BASE, image_url)
+
         km_raw = None
         if km_el:
             km_raw = km_el.get("content") or km_el.text
@@ -203,12 +212,13 @@ def parse_index_cards(html: str) -> list[dict]:
                 "currency": (currency_el.get("content") if currency_el else None) or "CLP",
                 "commune": city_el.text.strip().rstrip("|").strip() if city_el else None,
                 "region": region_el.text.strip() if region_el else None,
+                "image_url": image_url,
             }
         )
     return out
 
 
-def parse_detail(html: str) -> dict:
+def parse_detail(html: str, listing_url: str | None = None) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     out: dict[str, Any] = {}
 
@@ -298,6 +308,52 @@ def parse_detail(html: str) -> dict:
     if region_el:
         out["region"] = region_el.get_text(strip=True)
 
+    # Gallery images: acroadtrip.blob image URLs for this listing share the
+    # make/model URL slug. Related-listing image URLs carry a different slug
+    # pair. We pick the make+model slug from the listing's own URL.
+    image_urls: list[str] = []
+    make_slug = None
+    model_slug = None
+    if listing_url:
+        # listing_url: /auto/usado/<make>/<model>/<version?>/<hex_id>
+        parts = [p for p in listing_url.split("/") if p and p not in ("https:", "http:")]
+        # drop host if present
+        if parts and "autocosmos.cl" in parts[0]:
+            parts = parts[1:]
+        if len(parts) >= 4 and parts[0] == "auto" and parts[1] == "usado":
+            make_slug = parts[2]
+            model_slug = parts[3]
+    if make_slug and model_slug:
+        needle = f"/{make_slug}/{model_slug}/"
+        size_rank = {"Large": 0, "ExtraLarge": 1, "Medium": 2, "Small": 3}
+        # photo_uuid -> (rank, url) keeping the largest seen.
+        per_photo: dict[str, tuple[int, str]] = {}
+        # first-seen order for uuids
+        order: list[str] = []
+        pat = re.compile(
+            r'https://acroadtrip\.blob\.core\.windows\.net/publicaciones-imagenes/(Large|ExtraLarge|Medium|Small)/([^"\s<>)]+?\.webp)'
+        )
+        for m in pat.finditer(html):
+            size, tail = m.group(1), m.group(2)
+            # tail looks like "<make>/<model>/cl/RT_PU_<uuid>.webp"
+            # Require the current make/model directory is in the path.
+            if f"/{make_slug}/{model_slug}/" not in (f"/{tail}"):
+                continue
+            u = f"https://acroadtrip.blob.core.windows.net/publicaciones-imagenes/{size}/{tail}"
+            uuid_m = re.search(r"(RT_PU_[a-f0-9]{32})", tail)
+            if not uuid_m:
+                continue
+            pu = uuid_m.group(1)
+            rank = size_rank.get(size, 99)
+            if pu not in per_photo or rank < per_photo[pu][0]:
+                per_photo[pu] = (rank, u)
+            if pu not in order:
+                order.append(pu)
+        image_urls = [per_photo[pu][1] for pu in order if pu in per_photo]
+    if image_urls:
+        out["image_urls"] = image_urls
+        out["image_url"] = image_urls[0]
+
     return out
 
 
@@ -352,7 +408,7 @@ def scrape(
             time.sleep(delay)
             eprint(f"  [detail {len(collected)+1}/{target}] {url}")
             dhtml = fetch(s, url)
-            detail = parse_detail(dhtml) if dhtml else {}
+            detail = parse_detail(dhtml, listing_url=url) if dhtml else {}
             row = merge(card, detail)
 
             record = {
@@ -375,6 +431,8 @@ def scrape(
                 "posted_at": None,   # not exposed on public listing
                 "scraped_at": now,
                 "seller_type": row.get("seller_type"),
+                "image_url": row.get("image_url"),
+                "image_urls": row.get("image_urls"),
             }
             collected.append(record)
 
@@ -388,12 +446,23 @@ def scrape(
     return collected
 
 
+DEFAULT_TARGET = 300
+
+
 def main() -> None:
+    env_default = DEFAULT_TARGET
+    override = os.environ.get("SCRAPE_TARGET")
+    if override:
+        try:
+            env_default = int(override)
+        except ValueError:
+            pass
     ap = argparse.ArgumentParser()
-    ap.add_argument("--target", type=int, default=40)
+    ap.add_argument("--target", type=int, default=env_default)
     ap.add_argument("--out", default="data/autocosmos.json")
     ap.add_argument("--delay", type=float, default=0.8)
-    ap.add_argument("--max-pages", type=int, default=5)
+    # ~8 cards/page observed on this UA; allow plenty of headroom.
+    ap.add_argument("--max-pages", type=int, default=60)
     a = ap.parse_args()
     scrape(a.target, a.out, a.delay, a.max_pages)
 

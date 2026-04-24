@@ -31,6 +31,7 @@ Output: JSON array at
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -44,6 +45,7 @@ from bs4 import BeautifulSoup
 BASE = "https://www.yapo.cl"
 LIST_PATH = "/autos-usados"
 OUT_PATH = Path("data/yapo.json")
+DEFAULT_TARGET = 500
 
 HEADERS = {
     "User-Agent": (
@@ -216,6 +218,44 @@ def extract_tile(tile, ga4: dict[str, Any], scraped_at: str) -> dict[str, Any] |
         tail = re.sub(r"^\s*" + re.escape(model), "", tail, flags=re.I).strip()
         version = tail or None
 
+    # Images: the tile carousel uses lazy-loaded <img> where `src` is a base64
+    # gif placeholder and the real URL is in `data-src`. Collect every carousel
+    # photo for this tile.
+    image_url: str | None = None
+    image_urls: list[str] = []
+    for img_el in tile.select("img.d3-photos-carousel__photo"):
+        for attr in ("data-src", "data-original", "src"):
+            candidate = img_el.get(attr)
+            if isinstance(candidate, str) and candidate.startswith("http"):
+                candidate = candidate.strip()
+                if candidate not in image_urls:
+                    image_urls.append(candidate)
+                break
+    # Fallback to any tile img that starts with http (non-lazy tiles).
+    if not image_urls:
+        for img_el in tile.find_all("img"):
+            for attr in ("data-src", "data-original", "src"):
+                candidate = img_el.get(attr)
+                if isinstance(candidate, str) and candidate.startswith("http"):
+                    candidate = candidate.strip()
+                    if candidate not in image_urls:
+                        image_urls.append(candidate)
+                    break
+    if image_urls:
+        image_url = image_urls[0]
+    # ga4 may expose a primary image for older ads (uncommon today) — merge in.
+    meta_img = meta.get("image")
+    if isinstance(meta_img, str) and meta_img.strip().startswith("http"):
+        if not image_url:
+            image_url = meta_img.strip()
+        if meta_img.strip() not in image_urls:
+            image_urls.append(meta_img.strip())
+    meta_imgs = meta.get("images")
+    if isinstance(meta_imgs, list):
+        for u in meta_imgs:
+            if isinstance(u, str) and u.strip().startswith("http") and u.strip() not in image_urls:
+                image_urls.append(u.strip())
+
     return {
         "source": "yapo",
         "source_id": adid,
@@ -237,6 +277,8 @@ def extract_tile(tile, ga4: dict[str, Any], scraped_at: str) -> dict[str, Any] |
         "scraped_at": scraped_at,
         "seller_type": seller_type,
         "seller_name": seller_name,
+        "image_url": image_url,
+        "image_urls": image_urls or None,
     }
 
 
@@ -252,7 +294,7 @@ def extract_ga4_blobs(html: str) -> dict[str, Any]:
     return blobs
 
 
-def scrape(max_listings: int = 50, max_pages: int = 5) -> list[dict[str, Any]]:
+def scrape(max_listings: int = DEFAULT_TARGET, max_pages: int = 40) -> list[dict[str, Any]]:
     session = requests.Session()
     all_rows: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -299,8 +341,17 @@ def scrape(max_listings: int = 50, max_pages: int = 5) -> list[dict[str, Any]]:
 
 
 def main() -> int:
+    target = DEFAULT_TARGET
+    override = os.environ.get("SCRAPE_TARGET")
+    if override:
+        try:
+            target = int(override)
+        except ValueError:
+            pass
+    # 30 tiles/page -> enough headroom to reach `target` even with losses.
+    max_pages = max(5, (target // 25) + 5)
     try:
-        rows = scrape(max_listings=50, max_pages=5)
+        rows = scrape(max_listings=target, max_pages=max_pages)
     except Exception as e:
         log(f"[yapo] FATAL: {e}")
         rows = []
