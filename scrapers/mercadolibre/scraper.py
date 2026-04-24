@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """
-MercadoLibre Chile (autos.mercadolibre.cl) scraper.
+MercadoLibre Chile (autos.mercadolibre.cl) scraper — Playwright edition.
 
-Method: fetch the public search-results HTML pages under autos.mercadolibre.cl
-and extract the embedded per-item JSON objects. The HTML embeds the exact
-payload the internal search API returns (50 items per page), including
-attributes (BRAND/MODEL/VEHICLE_YEAR/KILOMETERS/FUEL_TYPE/TRANSMISSION/TRIM),
-seller info, address (state/city), permalink, price, currency, condition,
-date_created, etc. No authentication, no item-detail fetches needed.
+The stdlib requests / curl_cffi approach hits a "suspicious-traffic-frontend"
+challenge page (~21 KB) that requires the user to click "Continuar" before the
+real search results render. A real Chromium instance handles it trivially.
 
-The public api.mercadolibre.com /sites/MLC/search endpoint is now blocked
-for anonymous callers (403 PA_UNAUTHORIZED_RESULT_FROM_POLICIES) and requires
-an OAuth bearer token. The HTML front door remains open as long as we use a
-modern Chrome UA and establish device cookies via a warm-up request.
+Flow:
+  1. Launch headless Chromium with a realistic UA + locale es-CL.
+  2. Navigate to https://autos.mercadolibre.cl/autos/usados
+  3. If we land on a /sentry/ challenge (or small HTML), try to click the
+     Continuar button and wait for the real listings page to render.
+  4. Extract embedded JSON objects from the page HTML (same regex + bracket
+     matcher as the previous scraper).
+  5. Paginate by appending /_Desde_<offset>.
+  6. Normalize rows to the project schema.
+
+Graceful-fail: if we still can't get real listings (e.g. IP-based block),
+write an empty array + exit 0.
 """
 from __future__ import annotations
 
@@ -24,26 +29,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import requests
-
 SOURCE = "mercadolibre"
-SEARCH_URL = "https://autos.mercadolibre.cl/autos/usados"  # used cars only
+SEARCH_URL = "https://autos.mercadolibre.cl/autos/usados"
 PAGE_SIZE = 50
+DEFAULT_TARGET = 200
 
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/138.0.0.0 Safari/537.36"
 )
-BASE_HEADERS = {
-    "User-Agent": UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
-    "Sec-Ch-Ua": '"Chromium";v="138", "Not.A/Brand";v="24"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"macOS"',
-    "Upgrade-Insecure-Requests": "1",
-}
 
 FUEL_MAP = {
     "bencina": "gasolina",
@@ -77,49 +72,7 @@ def log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-def warm_up(s: requests.Session) -> None:
-    """Collect session cookies.
-
-    Sequence matters: visiting www.mercadolibre.cl/ sets _d2id and session
-    cookies, and visiting autos.mercadolibre.cl/ (which returns a tiny
-    bot-wall micro-landing but still Set-Cookie: autos.mercadolibre.cl _csrf)
-    is what unlocks real search-results HTML on the next request.
-    """
-    r = s.get("https://www.mercadolibre.cl/", headers=BASE_HEADERS, timeout=30)
-    r.raise_for_status()
-    log(f"warm-up home: {r.status_code} cookies={len(s.cookies)}")
-    headers = dict(BASE_HEADERS)
-    headers["Referer"] = "https://www.mercadolibre.cl/"
-    r2 = s.get("https://autos.mercadolibre.cl/", headers=headers, timeout=30)
-    # r2 is a 5KB micro-landing — that's fine, we just want the _csrf cookie.
-    log(f"warm-up autos-root: {r2.status_code} size={len(r2.text)} cookies={len(s.cookies)}")
-
-
-def fetch_page(s: requests.Session, offset: int) -> str:
-    if offset <= 1:
-        url = SEARCH_URL
-    else:
-        url = f"{SEARCH_URL}/_Desde_{offset}"
-    headers = dict(BASE_HEADERS)
-    headers["Referer"] = "https://autos.mercadolibre.cl/"
-    r = s.get(url, headers=headers, timeout=45)
-    r.raise_for_status()
-    if len(r.text) < 50_000:
-        # Anti-bot "Continuar" challenge page from suspicious-traffic-frontend.
-        # Signal gracefully instead of exiting non-zero; scraper will write
-        # an empty JSON array and ingester records an OK run with 0 rows.
-        # Needs Playwright or elevated API scope to bypass.
-        log(f"bot wall hit: {len(r.text)} bytes at {url} -- returning empty")
-        raise _BotWall()
-    return r.text
-
-
-class _BotWall(Exception):
-    """Raised when MercadoLibre serves the anti-bot challenge page."""
-
-
 def _slice_json_obj(s: str, start: int) -> Optional[str]:
-    """Bracket-match one JSON object starting at s[start] == '{'."""
     depth = 0
     in_str = False
     esc = False
@@ -193,7 +146,6 @@ def _norm_seller(item: Dict[str, Any]) -> Optional[str]:
     tags = seller.get("tags") or []
     if "car_dealer" in tags or "business" in tags or "brand" in tags:
         return "dealer"
-    # Default heuristic: classifieds with no dealer flag => private
     return "private"
 
 
@@ -262,30 +214,122 @@ def normalize(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _get_listings_html(page, url: str) -> str:
+    """Navigate to url, handle Continuar challenge if present, return HTML."""
+    log(f"  goto {url}")
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+    except Exception as e:
+        log(f"  ! goto failed: {e}")
+        return ""
+
+    # If we landed on a /sentry/ challenge, try to click Continuar and wait.
+    curr = page.url
+    if "/sentry/" in curr or "suspicious" in curr.lower():
+        log(f"  challenge page: {curr}")
+        clicked = False
+        for sel in (
+            'button:has-text("Continuar")',
+            'input[type="submit"][value*="Continuar"]',
+            'button[type="submit"]',
+        ):
+            try:
+                el = page.query_selector(sel)
+                if el:
+                    el.click()
+                    clicked = True
+                    log(f"  clicked selector: {sel}")
+                    break
+            except Exception as e:
+                log(f"  click {sel!r} failed: {e}")
+        if clicked:
+            try:
+                page.wait_for_url(
+                    lambda u: "/sentry/" not in u, timeout=30_000
+                )
+            except Exception as e:
+                log(f"  wait_for_url post-click failed: {e}")
+
+    # Wait for listings to actually render.
+    try:
+        page.wait_for_load_state("networkidle", timeout=20_000)
+    except Exception:
+        pass
+
+    try:
+        html = page.content()
+    except Exception as e:
+        log(f"  ! content() failed: {e}")
+        return ""
+
+    if len(html) < 50_000 or "/sentry/" in page.url:
+        log(f"  bot wall / tiny page: url={page.url} size={len(html)}")
+        return ""
+    return html
+
+
 def run(target: int, out_path: Path) -> None:
-    s = requests.Session()
     records: List[Dict[str, Any]] = []
     try:
-        warm_up(s)
-        offset = 1
-        pages = 0
-        while len(records) < target and pages < 8:
-            log(f"fetching offset={offset} (have {len(records)}/{target})")
-            html = fetch_page(s, offset)
-            items = parse_items(html)
-            log(f"  parsed {len(items)} items from page")
-            for it in items:
-                if it.get("condition") != "used":
-                    continue
-                rec = normalize(it)
-                records.append(rec)
-                if len(records) >= target:
+        from playwright.sync_api import sync_playwright
+    except ImportError as e:
+        log(f"playwright not installed: {e}")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("[]\n", encoding="utf-8")
+        return
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        context = browser.new_context(
+            user_agent=UA,
+            locale="es-CL",
+            timezone_id="America/Santiago",
+            viewport={"width": 1366, "height": 900},
+            extra_http_headers={
+                "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+            },
+        )
+        page = context.new_page()
+
+        try:
+            # Warm-up: visit mercadolibre.cl home first to collect cookies.
+            try:
+                page.goto("https://www.mercadolibre.cl/", wait_until="domcontentloaded", timeout=30_000)
+                log(f"warm-up home: {page.url}")
+            except Exception as e:
+                log(f"warm-up home failed: {e}")
+
+            offset = 1
+            pages_fetched = 0
+            while len(records) < target and pages_fetched < 8:
+                url = SEARCH_URL if offset <= 1 else f"{SEARCH_URL}/_Desde_{offset}"
+                log(f"fetching offset={offset} (have {len(records)}/{target})")
+                html = _get_listings_html(page, url)
+                if not html:
+                    log("  empty HTML — stopping pagination")
                     break
-            pages += 1
-            offset += PAGE_SIZE
-            time.sleep(0.4)
-    except _BotWall:
-        log("mercadolibre anti-bot wall — emitting empty array, exiting 0")
+                items = parse_items(html)
+                log(f"  parsed {len(items)} items from page")
+                if not items:
+                    break
+                for it in items:
+                    if it.get("condition") != "used":
+                        continue
+                    records.append(normalize(it))
+                    if len(records) >= target:
+                        break
+                pages_fetched += 1
+                offset += PAGE_SIZE
+                time.sleep(0.4)
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
@@ -295,7 +339,7 @@ def run(target: int, out_path: Path) -> None:
 
 if __name__ == "__main__":
     default_out = Path("data/mercadolibre.json")
-    target = 40
+    target = DEFAULT_TARGET
     if len(sys.argv) > 1:
         target = int(sys.argv[1])
     run(target, default_out)
