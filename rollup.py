@@ -148,6 +148,32 @@ def insert_stats(url: str, key: str, rows: list[dict[str, Any]]) -> int:
     return inserted
 
 
+def refresh_materialized_views() -> None:
+    """Refresh brand_rollup + model_rollup via the Supabase Management API.
+
+    Uses the PAT from SUPABASE_ACCESS_TOKEN (set in GH secrets / local .env)
+    because PostgREST can't execute REFRESH MATERIALIZED VIEW.
+    """
+    pat = os.environ.get("SUPABASE_ACCESS_TOKEN")
+    ref = os.environ.get("SUPABASE_PROJECT_REF", "izbokfsmplxielwiyvup")
+    if not pat:
+        log("no SUPABASE_ACCESS_TOKEN — skipping materialized view refresh")
+        return
+    for mv in ("brand_rollup", "model_rollup"):
+        r = requests.post(
+            f"https://api.supabase.com/v1/projects/{ref}/database/query",
+            headers={"Authorization": f"Bearer {pat}", "Content-Type": "application/json"},
+            data=json.dumps({
+                "query": f"REFRESH MATERIALIZED VIEW CONCURRENTLY car_tracker.{mv};"
+            }),
+            timeout=120,
+        )
+        if r.status_code >= 400:
+            log(f"refresh {mv} failed {r.status_code}: {r.text[:300]}")
+        else:
+            log(f"refreshed {mv}")
+
+
 def main() -> int:
     url = os.environ["SUPABASE_URL"].rstrip("/")
     key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -156,6 +182,8 @@ def main() -> int:
     rows = compute_stats(listings)
     inserted = insert_stats(url, key, rows)
     log(f"inserted {inserted} market_stats rows")
+
+    refresh_materialized_views()
     return 0
 
 
