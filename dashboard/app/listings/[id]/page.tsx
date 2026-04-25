@@ -3,6 +3,7 @@ import Image from "next/image";
 import { createClient } from "@/lib/supabase-server";
 import { Nav } from "@/components/nav";
 import { PriceChart } from "@/components/price-chart";
+import { WatchButton } from "@/components/watch-button";
 import { clp, km as fmtKm, daysSince, relTime } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +16,21 @@ async function load(id: number) {
     .eq("id", id)
     .maybeSingle();
   if (!listing) return null;
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  let watched = false;
+  if (user) {
+    const { data: w } = await supabase
+      .from("watchlist")
+      .select("listing_id")
+      .eq("user_id", user.id)
+      .eq("listing_id", id)
+      .maybeSingle();
+    watched = !!w;
+  }
 
   const { data: prices } = await supabase
     .from("listing_prices")
@@ -44,7 +60,7 @@ async function load(id: number) {
     }
   }
 
-  return { listing, prices: prices ?? [], marketMedian };
+  return { listing, prices: prices ?? [], marketMedian, watched };
 }
 
 export default async function Page({ params }: { params: { id: string } }) {
@@ -52,7 +68,7 @@ export default async function Page({ params }: { params: { id: string } }) {
   if (!Number.isFinite(id)) notFound();
   const data = await load(id);
   if (!data) notFound();
-  const { listing, prices, marketMedian } = data;
+  const { listing, prices, marketMedian, watched } = data;
 
   const price = listing.latest_price_clp as number | null;
   const delta =
@@ -129,14 +145,17 @@ export default async function Page({ params }: { params: { id: string } }) {
                 <Field label="Market median">{clp(marketMedian)}</Field>
               )}
             </dl>
-            <a
-              href={listing.url}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="mt-6 inline-block rounded-md border border-neutral-700 px-4 py-2 text-sm font-medium hover:bg-neutral-900"
-            >
-              Open on {listing.source} ↗
-            </a>
+            <div className="mt-6 flex items-center gap-3">
+              <a
+                href={listing.url}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="inline-block rounded-md border border-neutral-700 px-4 py-2 text-sm font-medium hover:bg-neutral-900"
+              >
+                Open on {listing.source} ↗
+              </a>
+              <WatchButton listingId={listing.id as number} initial={watched} />
+            </div>
           </div>
         </div>
 

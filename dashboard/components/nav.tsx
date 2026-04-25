@@ -6,6 +6,7 @@ export function Nav({ pathname }: { pathname: string }) {
     { href: "/listings", label: "Listings" },
     { href: "/deals", label: "Deals" },
     { href: "/insights", label: "Insights" },
+    { href: "/watchlist", label: "Watchlist" },
   ];
   return (
     <nav className="flex items-center gap-6 border-b border-neutral-800 px-6 py-3 text-sm">
