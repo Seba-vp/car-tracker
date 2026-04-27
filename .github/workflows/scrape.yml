@@ -87,6 +87,10 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Sources have 6k–60k inventories but we sample 100–500/day. Listings
+          # legitimately go ~2 weeks between re-sights even when still live;
+          # bumping the staleness window prevents false removals.
+          STALE_DAYS: '14'
         run: python finalize.py
       - name: Recompute market_stats + refresh rollup views
         env:
