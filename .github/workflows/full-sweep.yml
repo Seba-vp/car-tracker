@@ -85,14 +85,16 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Heavy active re-check + market_stats refresh
+      - name: Heavy active re-check + market_stats refresh + alerts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           STALE_DAYS: '5'        # tighter window — full sweep just touched everything live
           RECHECK_LIMIT: '5000'  # 10× the daily cap; weekly is the deep verify
           RECHECK_DELAY: '0.3'
         run: |
           python finalize.py
           python rollup.py
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then python alerts.py; fi

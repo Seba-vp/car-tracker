@@ -8,6 +8,7 @@ export function Nav({ pathname }: { pathname: string }) {
     { href: "/price-drops", label: "Price drops" },
     { href: "/insights", label: "Insights" },
     { href: "/watchlist", label: "Watchlist" },
+    { href: "/alerts", label: "Alerts" },
   ];
   return (
     <nav className="flex items-center gap-6 border-b border-neutral-800 px-6 py-3 text-sm">
