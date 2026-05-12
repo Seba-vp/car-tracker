@@ -5,6 +5,7 @@ export function Nav({ pathname }: { pathname: string }) {
     { href: "/", label: "Overview" },
     { href: "/listings", label: "Listings" },
     { href: "/deals", label: "Deals" },
+    { href: "/price-drops", label: "Price drops" },
     { href: "/insights", label: "Insights" },
     { href: "/watchlist", label: "Watchlist" },
   ];

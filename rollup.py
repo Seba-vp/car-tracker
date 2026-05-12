@@ -159,7 +159,7 @@ def refresh_materialized_views() -> None:
     if not pat:
         log("no SUPABASE_ACCESS_TOKEN — skipping materialized view refresh")
         return
-    for mv in ("brand_rollup", "model_rollup"):
+    for mv in ("brand_rollup", "model_rollup", "price_changes"):
         r = requests.post(
             f"https://api.supabase.com/v1/projects/{ref}/database/query",
             headers={"Authorization": f"Bearer {pat}", "Content-Type": "application/json"},
