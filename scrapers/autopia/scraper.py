@@ -324,15 +324,31 @@ def scrape(limit: int = 25, delay: float = 0.7) -> list[dict[str, Any]]:
 
 
 DEFAULT_TARGET = 150
+# Autopia (bravoauto) live stock is only ~120-150 listings — the homepage
+# Inertia payload already exposes them all. In full mode we just lift the cap.
+FULL_MODE_TARGET = 5_000
 
 
 def main() -> int:
     out_path = sys.argv[1] if len(sys.argv) > 1 else "data/autopia.json"
-    env_default = DEFAULT_TARGET
-    override = os.environ.get("SCRAPE_TARGET")
-    if override:
+    mode = os.environ.get("SCRAPE_MODE", "fresh").strip().lower() or "fresh"
+    if mode == "full":
+        env_default = FULL_MODE_TARGET
+        log(f"SCRAPE_MODE=full (target={env_default})")
+    else:
+        env_default = DEFAULT_TARGET
+        override = os.environ.get("SCRAPE_TARGET")
+        if override:
+            try:
+                env_default = int(override)
+            except ValueError:
+                pass
+    # Test cap override (only meaningful in full mode for fast pagination probes).
+    test_cap_env = os.environ.get("MAX_TEST_ROWS")
+    if test_cap_env:
         try:
-            env_default = int(override)
+            env_default = min(env_default, int(test_cap_env))
+            log(f"MAX_TEST_ROWS in effect: capped to {env_default}")
         except ValueError:
             pass
     limit = int(sys.argv[2]) if len(sys.argv) > 2 else env_default

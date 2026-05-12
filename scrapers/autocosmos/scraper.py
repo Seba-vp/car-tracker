@@ -377,6 +377,8 @@ def scrape(
     out_path: str,
     delay: float,
     max_pages: int,
+    list_page_delay: float = 1.0,
+    test_cap: int | None = None,
 ) -> list[dict]:
     s = session_with_retries()
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -399,6 +401,8 @@ def scrape(
 
         for card in cards:
             if len(collected) >= target:
+                break
+            if test_cap is not None and len(collected) >= test_cap:
                 break
             url = card["url"]
             if url in seen_urls:
@@ -436,8 +440,13 @@ def scrape(
             }
             collected.append(record)
 
+        if test_cap is not None and len(collected) >= test_cap:
+            eprint(f"[test] hit MAX_TEST_ROWS={test_cap}, stopping")
+            break
         page += 1
-        time.sleep(delay)
+        # Honor robots.txt Crawl-Delay between LIST pages only (per robots.txt
+        # this delay applies to the index walk, not per-listing detail fetches).
+        time.sleep(list_page_delay)
 
     eprint(f"[done] collected {len(collected)} listings")
     with open(out_path, "w", encoding="utf-8") as f:
@@ -447,24 +456,53 @@ def scrape(
 
 
 DEFAULT_TARGET = 300
+# Full inventory is enormous (~50k); pagination is virtually unbounded but
+# every list page costs 20s under robots.txt crawl-delay. Set a generous cap.
+FULL_MODE_TARGET = 50_000
+FULL_MODE_MAX_PAGES = 1_500
 
 
 def main() -> None:
-    env_default = DEFAULT_TARGET
-    override = os.environ.get("SCRAPE_TARGET")
-    if override:
+    mode = os.environ.get("SCRAPE_MODE", "fresh").strip().lower() or "fresh"
+    if mode == "full":
+        env_default = FULL_MODE_TARGET
+        env_max_pages = FULL_MODE_MAX_PAGES
+        # Respect robots.txt Crawl-Delay: 20 seconds between LIST pages.
+        env_list_page_delay = 20.0
+        eprint(f"[autocosmos] SCRAPE_MODE=full (target={env_default}, list_page_delay=20s)")
+    else:
+        env_default = DEFAULT_TARGET
+        env_max_pages = 60
+        env_list_page_delay = 1.0
+        override = os.environ.get("SCRAPE_TARGET")
+        if override:
+            try:
+                env_default = int(override)
+            except ValueError:
+                pass
+    test_cap = None
+    test_cap_env = os.environ.get("MAX_TEST_ROWS")
+    if test_cap_env:
         try:
-            env_default = int(override)
+            test_cap = int(test_cap_env)
         except ValueError:
-            pass
+            test_cap = None
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", type=int, default=env_default)
     ap.add_argument("--out", default="data/autocosmos.json")
     ap.add_argument("--delay", type=float, default=0.8)
     # ~8 cards/page observed on this UA; allow plenty of headroom.
-    ap.add_argument("--max-pages", type=int, default=60)
+    ap.add_argument("--max-pages", type=int, default=env_max_pages)
+    ap.add_argument("--list-page-delay", type=float, default=env_list_page_delay)
     a = ap.parse_args()
-    scrape(a.target, a.out, a.delay, a.max_pages)
+    scrape(
+        a.target,
+        a.out,
+        a.delay,
+        a.max_pages,
+        list_page_delay=a.list_page_delay,
+        test_cap=test_cap,
+    )
 
 
 if __name__ == "__main__":

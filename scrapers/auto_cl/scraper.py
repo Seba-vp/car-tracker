@@ -195,12 +195,27 @@ def parse_listing(url: str, html: str) -> dict[str, Any] | None:
     }
 
 
-def main(limit: int = 20) -> None:
+def main(limit: int = 20, full_mode: bool = False) -> None:
     session = requests.Session(impersonate="safari17_0")
     log("loading sitemap")
     urls = get_used_urls(session)
     log(f"{len(urls)} used detail URLs in sitemap")
-    random.shuffle(urls)
+    if not full_mode:
+        # fresh mode: random sample so daily runs see diverse stock.
+        random.shuffle(urls)
+    # full mode: iterate the sitemap in its natural order to walk the inventory
+    # exhaustively (auto.cl orders sitemap entries roughly by recency).
+
+    test_cap = None
+    test_cap_env = os.environ.get("MAX_TEST_ROWS")
+    if test_cap_env:
+        try:
+            test_cap = int(test_cap_env)
+        except ValueError:
+            test_cap = None
+    if test_cap is not None:
+        limit = min(limit, test_cap)
+        log(f"MAX_TEST_ROWS in effect: capped to {limit}")
 
     results: list[dict[str, Any]] = []
     attempts = 0
@@ -243,11 +258,18 @@ def main(limit: int = 20) -> None:
 
 
 DEFAULT_TARGET = 300
+# auto.cl sitemap exposes ~6,140 used listings. Full mode walks all of them.
+FULL_MODE_TARGET = 20_000
 
 
 if __name__ == "__main__":
+    mode = os.environ.get("SCRAPE_MODE", "fresh").strip().lower() or "fresh"
+    full_mode = mode == "full"
     if len(sys.argv) > 1:
         n = int(sys.argv[1])
+    elif full_mode:
+        n = FULL_MODE_TARGET
+        log(f"SCRAPE_MODE=full (target={n})")
     else:
         n = DEFAULT_TARGET
         override = os.environ.get("SCRAPE_TARGET")
@@ -256,4 +278,4 @@ if __name__ == "__main__":
                 n = int(override)
             except ValueError:
                 pass
-    main(n)
+    main(n, full_mode=full_mode)

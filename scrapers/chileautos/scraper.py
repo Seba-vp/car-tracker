@@ -387,6 +387,58 @@ def normalise(src_listing, details_tracking, heading, url, detail_images=None):
 
 # --- Main -----------------------------------------------------------------------
 
+REGIONS = [
+    "metropolitana-de-santiago",
+    "valparaiso",
+    "biobio",
+    "maule",
+    "ohiggins",
+    "araucania",
+    "los-lagos",
+    "coquimbo",
+    "antofagasta",
+    "los-rios",
+    "atacama",
+    "nuble",
+    "tarapaca",
+    "arica-parinacota",
+    "magallanes",
+    "aysen",
+]
+
+MAKES = [
+    "toyota", "chevrolet", "nissan", "hyundai", "kia", "mazda", "suzuki",
+    "ford", "mitsubishi", "peugeot", "volkswagen", "honda", "jeep",
+    "subaru", "mercedes-benz", "bmw", "audi", "renault", "mg",
+    "great-wall", "dongfeng", "chery", "changan", "jac", "jetour",
+]
+
+# Year buckets in 3-year windows covering modern used inventory.
+# Each tuple is (lo_year, hi_year_inclusive).
+YEAR_BUCKETS = [
+    (1990, 2000),
+    (2001, 2005),
+    (2006, 2008),
+    (2009, 2011),
+    (2012, 2014),
+    (2015, 2017),
+    (2018, 2020),
+    (2021, 2023),
+    (2024, 2026),
+]
+
+# Price buckets in CLP. The last open-ended bucket uses a very high cap.
+PRICE_BUCKETS = [
+    (0, 5_000_000),
+    (5_000_000, 10_000_000),
+    (10_000_000, 15_000_000),
+    (15_000_000, 20_000_000),
+    (20_000_000, 30_000_000),
+    (30_000_000, 50_000_000),
+    (50_000_000, 1_000_000_000),
+]
+
+
 def collect_listing_ids(session, target_count=50, max_pages=60):
     """Page through search-core collecting unique listing refs.
 
@@ -428,24 +480,6 @@ def collect_listing_ids(session, target_count=50, max_pages=60):
         return list(seen.values())
 
     # 2. Region shards. Chile's 16 regions; list the 8 with most stock first.
-    REGIONS = [
-        "metropolitana-de-santiago",
-        "valparaiso",
-        "biobio",
-        "maule",
-        "ohiggins",
-        "araucania",
-        "los-lagos",
-        "coquimbo",
-        "antofagasta",
-        "los-rios",
-        "atacama",
-        "nuble",
-        "tarapaca",
-        "arica-parinacota",
-        "magallanes",
-        "aysen",
-    ]
     for region in REGIONS:
         if len(seen) >= target_count:
             break
@@ -455,12 +489,6 @@ def collect_listing_ids(session, target_count=50, max_pages=60):
             break
 
     # 3. Make shards for the most common brands (top ~25 in Chile).
-    MAKES = [
-        "toyota", "chevrolet", "nissan", "hyundai", "kia", "mazda", "suzuki",
-        "ford", "mitsubishi", "peugeot", "volkswagen", "honda", "jeep",
-        "subaru", "mercedes-benz", "bmw", "audi", "renault", "mg",
-        "great-wall", "dongfeng", "chery", "changan", "jac", "jetour",
-    ]
     for make in MAKES:
         if len(seen) >= target_count:
             break
@@ -472,7 +500,104 @@ def collect_listing_ids(session, target_count=50, max_pages=60):
     return list(seen.values())
 
 
-def scrape(target_count=40):
+def collect_listing_ids_full(session, target_count=5000, test_cap=None):
+    """Full-mode sharding to defeat the ~140-result-per-query API ceiling.
+
+    Strategy: for each (region, make, year-bucket, price-bucket) tuple, issue
+    a small Carsales-query and dedupe by networkId. The four-dimensional
+    shard grid surfaces thousands of unique listings.
+
+    `target_count` is a soft stop: we exit once unique count reaches it. With
+    ~16 regions × ~25 makes × 9 year-buckets × 7 price-buckets the upper
+    bound is ~25k shard calls — far more than needed, so we order shards by
+    expected stock density and stop early.
+    """
+    seen: dict[str, dict] = {}
+
+    def _record(tiles):
+        new = 0
+        for t in tiles:
+            if t["networkId"] not in seen:
+                seen[t["networkId"]] = t
+                new += 1
+        return new
+
+    def _query_once(q):
+        """Single API call. Returns True on success (no transport error)."""
+        url = f"{SEARCH_API}?q={q}&offset=0"
+        j = fetch_json(url, session)
+        if not j:
+            return False
+        tiles = extract_search_listings(j)
+        new = _record(tiles)
+        log(f"  q={q[:80]}... +{new} new (total {len(seen)})")
+        polite_sleep()
+        return True
+
+    # Phase 0: broad warm-up (gets featured stock).
+    log("=== chileautos full-mode shard expansion ===")
+    log("phase 0: baseline + region + make shards (existing strategy)")
+    _query_once(QUERY)
+    for region in REGIONS:
+        if len(seen) >= target_count or (test_cap and len(seen) >= test_cap):
+            return list(seen.values())
+        q = f"(And.(C.Category.autos.)_.State.Usado._.Region.{region}.)"
+        _query_once(q)
+    for make in MAKES:
+        if len(seen) >= target_count or (test_cap and len(seen) >= test_cap):
+            return list(seen.values())
+        q = f"(And.(C.Category.autos.)_.State.Usado._.Make.{make}.)"
+        _query_once(q)
+
+    # Phase 1: year × make shards (cheap, breaks ~140 ceiling per make).
+    log("phase 1: make × year-bucket shards")
+    for make in MAKES:
+        if len(seen) >= target_count or (test_cap and len(seen) >= test_cap):
+            return list(seen.values())
+        for ylo, yhi in YEAR_BUCKETS:
+            if len(seen) >= target_count or (test_cap and len(seen) >= test_cap):
+                return list(seen.values())
+            q = (
+                f"(And.(C.Category.autos.)_.State.Usado."
+                f"_.Make.{make}._.Year.range({ylo}..{yhi}).)"
+            )
+            _query_once(q)
+
+    # Phase 2: price × make shards.
+    log("phase 2: make × price-bucket shards")
+    for make in MAKES:
+        if len(seen) >= target_count or (test_cap and len(seen) >= test_cap):
+            return list(seen.values())
+        for plo, phi in PRICE_BUCKETS:
+            if len(seen) >= target_count or (test_cap and len(seen) >= test_cap):
+                return list(seen.values())
+            q = (
+                f"(And.(C.Category.autos.)_.State.Usado."
+                f"_.Make.{make}._.Price.range({plo}..{phi}).)"
+            )
+            _query_once(q)
+
+    # Phase 3: full 4-dimensional grid. Only reach this if earlier phases
+    # haven't surfaced the target. Iterate region × make × year × price.
+    log("phase 3: full region × make × year × price grid")
+    for region in REGIONS:
+        for make in MAKES:
+            for ylo, yhi in YEAR_BUCKETS:
+                for plo, phi in PRICE_BUCKETS:
+                    if len(seen) >= target_count or (test_cap and len(seen) >= test_cap):
+                        return list(seen.values())
+                    q = (
+                        f"(And.(C.Category.autos.)_.State.Usado."
+                        f"_.Region.{region}._.Make.{make}"
+                        f"._.Year.range({ylo}..{yhi})"
+                        f"._.Price.range({plo}..{phi}).)"
+                    )
+                    _query_once(q)
+
+    return list(seen.values())
+
+
+def scrape(target_count=40, full_mode=False, test_cap=None):
     session = requests.Session()
     session.headers.update(HEADERS)
 
@@ -483,8 +608,19 @@ def scrape(target_count=40):
         pass
 
     log("=== Step 1: enumerate listings via /_api/search-core ===")
-    refs = collect_listing_ids(session, target_count=target_count)
+    if full_mode:
+        refs = collect_listing_ids_full(
+            session, target_count=target_count, test_cap=test_cap
+        )
+    else:
+        refs = collect_listing_ids(session, target_count=target_count)
     log(f"collected {len(refs)} listing refs total")
+
+    # Apply MAX_TEST_ROWS to detail fetches too (don't burn time fetching
+    # thousands of detail pages during local tests).
+    if test_cap is not None:
+        refs = refs[:test_cap]
+        log(f"MAX_TEST_ROWS applied to detail step: capped to {len(refs)} refs")
 
     log("=== Step 2: fetch each detail via /_api/details-core ===")
     out = []
@@ -509,10 +645,18 @@ def scrape(target_count=40):
 
 
 DEFAULT_TARGET = 500
+# Full sweep target: at least 5k unique listings via shard expansion.
+FULL_MODE_TARGET = 8_000
 
 
 def main():
-    target = DEFAULT_TARGET
+    mode = os.environ.get("SCRAPE_MODE", "fresh").strip().lower() or "fresh"
+    full_mode = mode == "full"
+    if full_mode:
+        target = FULL_MODE_TARGET
+        log(f"SCRAPE_MODE=full (target={target})")
+    else:
+        target = DEFAULT_TARGET
     override = os.environ.get("SCRAPE_TARGET")
     if override:
         try:
@@ -524,7 +668,15 @@ def main():
             target = int(sys.argv[1])
         except ValueError:
             pass
-    listings = scrape(target_count=target)
+    test_cap = None
+    test_cap_env = os.environ.get("MAX_TEST_ROWS")
+    if test_cap_env:
+        try:
+            test_cap = int(test_cap_env)
+        except ValueError:
+            test_cap = None
+
+    listings = scrape(target_count=target, full_mode=full_mode, test_cap=test_cap)
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(json.dumps(listings, ensure_ascii=False, indent=2))
     log(f"wrote {len(listings)} listings to {OUT_PATH}")

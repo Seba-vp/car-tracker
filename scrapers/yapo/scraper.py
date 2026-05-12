@@ -46,6 +46,11 @@ BASE = "https://www.yapo.cl"
 LIST_PATH = "/autos-usados"
 OUT_PATH = Path("data/yapo.json")
 DEFAULT_TARGET = 500
+# In SCRAPE_MODE=full we paginate the entire /autos-usados inventory.
+# As of 2026 the live stock is ~36k listings; the API serves ~30 tiles/page so
+# ~1.2k pages bound the walk. We use a generous safety cap to avoid runaway.
+FULL_MODE_TARGET = 50_000
+FULL_MODE_MAX_PAGES = 2_500
 
 HEADERS = {
     "User-Agent": (
@@ -299,7 +304,17 @@ def scrape(max_listings: int = DEFAULT_TARGET, max_pages: int = 40) -> list[dict
     all_rows: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
 
+    # MAX_TEST_ROWS allows tests to cap full-mode runs without spending hours.
+    test_cap = None
+    test_cap_env = os.environ.get("MAX_TEST_ROWS")
+    if test_cap_env:
+        try:
+            test_cap = int(test_cap_env)
+        except ValueError:
+            test_cap = None
+
     prev_url: str | None = None
+    empty_pages_in_a_row = 0
     for page in range(1, max_pages + 1):
         path = LIST_PATH if page == 1 else f"{LIST_PATH}.{page}"
         url = BASE + path
@@ -329,10 +344,25 @@ def scrape(max_listings: int = DEFAULT_TARGET, max_pages: int = 40) -> list[dict
             page_new += 1
             if len(all_rows) >= max_listings:
                 break
+            if test_cap is not None and len(all_rows) >= test_cap:
+                break
 
         log(f"[yapo]   +{page_new} new (total {len(all_rows)})")
         if len(all_rows) >= max_listings:
             break
+        if test_cap is not None and len(all_rows) >= test_cap:
+            log(f"[yapo] hit MAX_TEST_ROWS={test_cap}, stopping")
+            break
+
+        # Pagination termination: yapo serves an empty/repeat page when we run
+        # off the end. Two consecutive zero-yield pages = done.
+        if page_new == 0:
+            empty_pages_in_a_row += 1
+            if empty_pages_in_a_row >= 2:
+                log("[yapo] two empty pages in a row — pagination exhausted")
+                break
+        else:
+            empty_pages_in_a_row = 0
 
         # polite delay between pages
         time.sleep(1.5)
@@ -341,15 +371,21 @@ def scrape(max_listings: int = DEFAULT_TARGET, max_pages: int = 40) -> list[dict
 
 
 def main() -> int:
-    target = DEFAULT_TARGET
-    override = os.environ.get("SCRAPE_TARGET")
-    if override:
-        try:
-            target = int(override)
-        except ValueError:
-            pass
-    # 30 tiles/page -> enough headroom to reach `target` even with losses.
-    max_pages = max(5, (target // 25) + 5)
+    mode = os.environ.get("SCRAPE_MODE", "fresh").strip().lower() or "fresh"
+    if mode == "full":
+        target = FULL_MODE_TARGET
+        max_pages = FULL_MODE_MAX_PAGES
+        log(f"[yapo] SCRAPE_MODE=full (target={target}, max_pages={max_pages})")
+    else:
+        target = DEFAULT_TARGET
+        override = os.environ.get("SCRAPE_TARGET")
+        if override:
+            try:
+                target = int(override)
+            except ValueError:
+                pass
+        # 30 tiles/page -> enough headroom to reach `target` even with losses.
+        max_pages = max(5, (target // 25) + 5)
     try:
         rows = scrape(max_listings=target, max_pages=max_pages)
     except Exception as e:

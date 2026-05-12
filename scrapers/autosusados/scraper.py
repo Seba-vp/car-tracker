@@ -87,8 +87,11 @@ def fetch_sitemap_urls(session: requests.Session, sitemap_url: str) -> list[str]
     return re.findall(r"<loc>([^<]+)</loc>", r.text)
 
 
-def collect_listing_urls(session: requests.Session, limit: int) -> list[str]:
-    """Collect roughly limit URLs, mixing dealer + private sitemaps."""
+def collect_listing_urls(session: requests.Session, limit: int, full_mode: bool = False) -> list[str]:
+    """Collect roughly limit URLs, mixing dealer + private sitemaps.
+
+    In full mode we return every listing URL from every sub-sitemap (no
+    sampling, no shuffle) so we exhaustively walk the inventory."""
     urls: list[str] = []
     per_sitemap = max(limit // len(SUB_SITEMAPS), 1) * 4  # overshoot then sample
     for sm in SUB_SITEMAPS:
@@ -100,11 +103,16 @@ def collect_listing_urls(session: requests.Session, limit: int) -> list[str]:
             continue
         listings = [u for u in all_locs if re.search(r"/\d+/?$", u)]
         log(f"  {len(listings)} listing URLs found")
-        random.shuffle(listings)
-        urls.extend(listings[:per_sitemap])
+        if full_mode:
+            urls.extend(listings)
+        else:
+            random.shuffle(listings)
+            urls.extend(listings[:per_sitemap])
         polite_sleep()
-    random.shuffle(urls)
-    return urls[:limit]
+    if not full_mode:
+        random.shuffle(urls)
+        return urls[:limit]
+    return urls
 
 
 def extract_next_data(html: str) -> dict[str, Any] | None:
@@ -227,10 +235,21 @@ def parse_listing(url: str, html: str) -> dict[str, Any] | None:
     }
 
 
-def main(limit: int = 20) -> None:
+def main(limit: int = 20, full_mode: bool = False) -> None:
     session = requests.Session()
-    urls = collect_listing_urls(session, limit * 2)
+    urls = collect_listing_urls(session, limit * 2, full_mode=full_mode)
     log(f"collected {len(urls)} candidate URLs; targeting {limit} successful parses")
+
+    test_cap = None
+    test_cap_env = os.environ.get("MAX_TEST_ROWS")
+    if test_cap_env:
+        try:
+            test_cap = int(test_cap_env)
+        except ValueError:
+            test_cap = None
+    if test_cap is not None:
+        limit = min(limit, test_cap)
+        log(f"MAX_TEST_ROWS in effect: capped to {limit}")
 
     results: list[dict[str, Any]] = []
     attempts = 0
@@ -269,11 +288,19 @@ def main(limit: int = 20) -> None:
 
 
 DEFAULT_TARGET = 300
+# Sitemap exposes ~7,602 used listings (dealer + particular). Full mode walks
+# every entry. ~1 req/s -> ~2h sweep at production scale.
+FULL_MODE_TARGET = 20_000
 
 
 if __name__ == "__main__":
+    mode = os.environ.get("SCRAPE_MODE", "fresh").strip().lower() or "fresh"
+    full_mode = mode == "full"
     if len(sys.argv) > 1:
         n = int(sys.argv[1])
+    elif full_mode:
+        n = FULL_MODE_TARGET
+        log(f"SCRAPE_MODE=full (target={n})")
     else:
         n = DEFAULT_TARGET
         override = os.environ.get("SCRAPE_TARGET")
@@ -282,4 +309,4 @@ if __name__ == "__main__":
                 n = int(override)
             except ValueError:
                 pass
-    main(n)
+    main(n, full_mode=full_mode)
